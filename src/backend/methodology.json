@@ -1,0 +1,28 @@
+{
+  "version": "GB-CARBON-v1.0",
+  "acu_definition": "1 ACU = 1 g CO2e net avoided versus the configured cloud baseline. ACU is an internal GreenByte accounting unit, not a carbon credit or financial token.",
+  "cloud": {
+    "default_profile": "demo-calibrated-reference",
+    "default_pue": 1.10,
+    "default_carbon_intensity_g_per_kwh": 402,
+    "profiles": {
+      "demo-calibrated-reference": {
+        "label": "Demo calibrated cloud profile — replace coefficients with your benchmark before final judging",
+        "alpha_j": 48.0,
+        "beta_input_j_per_token": 1.25,
+        "beta_output_j_per_token": 8.7,
+        "gamma_j_per_context_token": 0.012,
+        "pue": 1.10,
+        "carbon_intensity_g_per_kwh": 402
+      }
+    }
+  },
+  "local": {
+    "default_carbon_intensity_g_per_kwh": 43,
+    "note": "43 gCO2e/kWh is included only as a lifecycle-style solar demo factor. Replace it with your selected accounting boundary and documented source."
+  },
+  "verification": {
+    "default_overhead_g": 0.0,
+    "note": "Set a measured or allocated verification footprint when you benchmark the final GreenByte Chain."
+  }
+}
