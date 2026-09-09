@@ -39,6 +39,7 @@ ledger = GreenByteLedger(DB_PATH)
 
 METHODOLOGY_VERSION = "GB-CARBON-v1.0"
 SOURCE_LIVE_WINDOW_SECONDS = 30
+FRONTEND_BASE_URL = os.getenv("GREENBYTE_FRONTEND_URL", "http://localhost:3000").rstrip("/")
 _last_source_seen: dict[str, float] = {}
 _last_source_name = "Friend AI Runtime"
 
@@ -191,13 +192,18 @@ def calculate_impact(data: dict):
 
 def row_to_record(row):
     payload = json.loads(row["payload_json"])
+    certificate_id = row["certificate_id"]
     payload.update({
         "session_id": row["session_id"],
-        "certificate_id": row["certificate_id"],
+        "certificate_id": certificate_id,
         "source_id": row["source_id"],
         "verified_at": row["verified_at"],
+        # Kept for backwards compatibility. This field is the stored ledger block hash.
         "proof_hash": row["proof_hash"],
         "block_index": int(row["block_index"]),
+        "certificate_url": f"{FRONTEND_BASE_URL}/certificate/{certificate_id}",
+        "proof_url": f"{FRONTEND_BASE_URL}/proof/{certificate_id}",
+        "verify_url": f"{FRONTEND_BASE_URL}/verify/{certificate_id}",
     })
     return payload
 
@@ -208,6 +214,116 @@ def latest_records(limit=12):
             "SELECT * FROM impact_sessions ORDER BY id DESC LIMIT ?", (int(limit),)
         ).fetchall()
     return [row_to_record(row) for row in rows]
+
+
+def find_certificate_row(certificate_id: str):
+    with connect_db() as conn:
+        return conn.execute(
+            "SELECT * FROM impact_sessions WHERE certificate_id = ?", (certificate_id,)
+        ).fetchone()
+
+
+def methodology_payload_for_record(record: dict) -> dict:
+    return {
+        "version": record.get("methodology_version", METHODOLOGY_VERSION),
+        "formula": {
+            "cloud": "cloud_energy_j * PUE / 3600000 * cloud_carbon_intensity_g_per_kwh",
+            "local": "local_energy_j / 3600000 * local_carbon_intensity_g_per_kwh",
+            "net": "max(0, cloud - local - verification_overhead_g)",
+        },
+        "cloud_profile": record.get("cloud_profile"),
+        "cloud_pue": record.get("cloud_pue"),
+        "cloud_ci": record.get("cloud_carbon_intensity_g_per_kwh"),
+        "local_ci": record.get("local_carbon_intensity_g_per_kwh"),
+    }
+
+
+def evidence_payload_for_record(record: dict, methodology_hash: str) -> dict:
+    return {
+        "session_id": record["session_id"],
+        "source_id": record["source_id"],
+        "input_tokens": int(record.get("input_tokens", 0)),
+        "output_tokens": int(record.get("output_tokens", 0)),
+        "local_energy_j": float(record.get("local_energy_j", 0)),
+        "cloud_energy_j": float(record.get("cloud_energy_j", 0)),
+        "model": record.get("model", "Unknown model"),
+        "device": record.get("device", "Unknown edge device"),
+        "cloud_provider": record.get("cloud_provider", "Configured cloud baseline"),
+        "cloud_model": record.get("cloud_model", "Configured cloud model"),
+        "cloud_input_tokens": int(record.get("cloud_input_tokens", record.get("input_tokens", 0)) or 0),
+        "cloud_output_tokens": int(record.get("cloud_output_tokens", record.get("output_tokens", 0)) or 0),
+        "cloud_duration_s": float(record.get("cloud_duration_s", 0) or 0),
+        "methodology_hash": methodology_hash,
+        "verified_at": record["verified_at"],
+    }
+
+
+def build_verification(certificate_id: str):
+    row = find_certificate_row(certificate_id)
+    if not row:
+        return None
+
+    record = row_to_record(row)
+    block = ledger.get_block(record["block_index"])
+    block_check = ledger.verify_block(record["block_index"])
+
+    methodology_payload = methodology_payload_for_record(record)
+    recalculated_methodology_hash = canonical_hash(methodology_payload)
+    evidence_payload = evidence_payload_for_record(record, recalculated_methodology_hash)
+    recalculated_evidence_hash = canonical_hash(evidence_payload)
+
+    stored_methodology_hash = None
+    stored_evidence_hash = None
+    if block and isinstance(block.get("payload"), dict):
+        stored_methodology_hash = block["payload"].get("methodology_hash")
+        stored_evidence_hash = block["payload"].get("evidence_hash")
+
+    methodology_valid = stored_methodology_hash == recalculated_methodology_hash
+    evidence_valid = stored_evidence_hash == recalculated_evidence_hash
+    block_hash_matches_session = bool(block and block.get("block_hash") == record.get("proof_hash"))
+    block_payload_matches_session = bool(
+        block
+        and block.get("payload", {}).get("session_id") == record.get("session_id")
+        and block.get("payload", {}).get("source_id") == record.get("source_id")
+    )
+    chain_valid = ledger.verify()
+
+    verified = all([
+        methodology_valid,
+        evidence_valid,
+        block_hash_matches_session,
+        block_payload_matches_session,
+        bool(block_check.get("hash_valid")),
+        bool(block_check.get("previous_link_valid")),
+        chain_valid,
+    ])
+
+    return {
+        "verified": verified,
+        "certificate_id": certificate_id,
+        "record": record,
+        "methodology": {
+            "payload": methodology_payload,
+            "stored_hash": stored_methodology_hash,
+            "recalculated_hash": recalculated_methodology_hash,
+            "valid": methodology_valid,
+        },
+        "evidence": {
+            "payload": evidence_payload,
+            "stored_hash": stored_evidence_hash,
+            "recalculated_hash": recalculated_evidence_hash,
+            "valid": evidence_valid,
+        },
+        "ledger": {
+            "network": "GreenByte Ledger PoC",
+            "block": block,
+            "block_check": block_check,
+            "block_hash_matches_session": block_hash_matches_session,
+            "block_payload_matches_session": block_payload_matches_session,
+            "chain_valid": chain_valid,
+            "height": ledger.height(),
+        },
+    }
 
 
 def current_source_state():
@@ -263,9 +379,21 @@ def inference_report():
             "device": str(data.get("device", "Unknown edge device")),
             "energy_source": str(data.get("energy_source", "Unknown energy source")),
             "local_measurement_origin": str(data.get("local_measurement_origin", "AI runtime / power telemetry")),
+            "local_duration_s": float(data.get("local_duration_s", 0) or 0),
+            "local_average_gpu_w": float(data.get("local_average_gpu_w", 0) or 0),
+            "local_peak_gpu_w": float(data.get("local_peak_gpu_w", 0) or 0),
+            "cloud_provider": str(data.get("cloud_provider", "Configured cloud baseline")),
+            "cloud_model": str(data.get("cloud_model", "Configured cloud model")),
+            "cloud_input_tokens": int(data.get("cloud_input_tokens", impact["input_tokens"]) or 0),
+            "cloud_output_tokens": int(data.get("cloud_output_tokens", impact["output_tokens"]) or 0),
+            "cloud_total_tokens": int(data.get("cloud_total_tokens", 0) or 0),
+            "cloud_duration_s": float(data.get("cloud_duration_s", 0) or 0),
+            "cloud_energy_origin": str(data.get("cloud_energy_origin", "Configured / estimated cloud energy")),
             "methodology_version": METHODOLOGY_VERSION,
             **impact,
         }
+        if not record["cloud_total_tokens"]:
+            record["cloud_total_tokens"] = record["cloud_input_tokens"] + record["cloud_output_tokens"]
 
         methodology_payload = {
             "version": METHODOLOGY_VERSION,
@@ -290,6 +418,11 @@ def inference_report():
             "cloud_energy_j": impact["cloud_energy_j"],
             "model": record["model"],
             "device": record["device"],
+            "cloud_provider": record["cloud_provider"],
+            "cloud_model": record["cloud_model"],
+            "cloud_input_tokens": record["cloud_input_tokens"],
+            "cloud_output_tokens": record["cloud_output_tokens"],
+            "cloud_duration_s": record["cloud_duration_s"],
             "methodology_hash": methodology_hash,
             "verified_at": verified_at,
         }
@@ -400,13 +533,46 @@ def dashboard():
 
 @app.get("/api/certificate/<certificate_id>")
 def certificate(certificate_id):
-    with connect_db() as conn:
-        row = conn.execute(
-            "SELECT * FROM impact_sessions WHERE certificate_id = ?", (certificate_id,)
-        ).fetchone()
+    row = find_certificate_row(certificate_id)
     if not row:
         return jsonify({"status": "error", "error": "certificate not found"}), 404
-    return jsonify({"status": "success", "record": row_to_record(row), "ledger_valid": ledger.verify()})
+    record = row_to_record(row)
+    return jsonify({
+        "status": "success",
+        "record": record,
+        "ledger_valid": ledger.verify(),
+        "links": {
+            "certificate": record["certificate_url"],
+            "proof": record["proof_url"],
+            "verify": record["verify_url"],
+        },
+    })
+
+
+@app.get("/api/proof/<certificate_id>")
+def proof(certificate_id):
+    verification = build_verification(certificate_id)
+    if not verification:
+        return jsonify({"status": "error", "error": "certificate not found"}), 404
+    return jsonify({
+        "status": "success",
+        "certificate_id": certificate_id,
+        "record": verification["record"],
+        "methodology": verification["methodology"],
+        "evidence": verification["evidence"],
+        "ledger": verification["ledger"],
+    })
+
+
+@app.get("/api/verify/<certificate_id>")
+def verify_certificate(certificate_id):
+    verification = build_verification(certificate_id)
+    if not verification:
+        return jsonify({"status": "error", "error": "certificate not found"}), 404
+    return jsonify({
+        "status": "success",
+        **verification,
+    })
 
 
 @app.get("/api/chain/verify")
