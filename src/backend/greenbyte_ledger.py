@@ -118,6 +118,51 @@ class GreenByteLedger:
             expected_previous = str(row["block_hash"])
         return True
 
+
+    def get_block(self, block_index: int) -> dict[str, Any] | None:
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT * FROM ledger_blocks WHERE block_index = ?", (int(block_index),)
+            ).fetchone()
+        if not row:
+            return None
+        payload_json = str(row["payload_json"])
+        return {
+            "block_index": int(row["block_index"]),
+            "timestamp": str(row["timestamp"]),
+            "previous_hash": str(row["previous_hash"]),
+            "block_hash": str(row["block_hash"]),
+            "payload_json": payload_json,
+            "payload": json.loads(payload_json),
+        }
+
+    def verify_block(self, block_index: int) -> dict[str, Any]:
+        block = self.get_block(block_index)
+        if not block:
+            return {"exists": False, "hash_valid": False, "previous_link_valid": False}
+
+        recalculated = self.hash_block(
+            block["block_index"],
+            block["timestamp"],
+            block["previous_hash"],
+            block["payload_json"],
+        )
+        hash_valid = recalculated == block["block_hash"]
+
+        if block["block_index"] == 0:
+            previous_link_valid = block["previous_hash"] == "0" * 64
+        else:
+            previous = self.get_block(block["block_index"] - 1)
+            previous_link_valid = bool(previous and previous["block_hash"] == block["previous_hash"])
+
+        return {
+            "exists": True,
+            "hash_valid": hash_valid,
+            "previous_link_valid": previous_link_valid,
+            "recalculated_block_hash": recalculated,
+            "stored_block_hash": block["block_hash"],
+        }
+
     def blocks(self, limit: int = 50) -> list[dict[str, Any]]:
         with self._connect() as conn:
             rows = conn.execute(
