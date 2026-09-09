@@ -23,10 +23,23 @@ type ImpactRecord = {
   methodology_version: string;
   baseline_origin: string;
   local_measurement_origin: string;
+  local_duration_s?: number;
+  local_average_gpu_w?: number;
+  local_peak_gpu_w?: number;
+  cloud_provider?: string;
+  cloud_model?: string;
+  cloud_input_tokens?: number;
+  cloud_output_tokens?: number;
+  cloud_total_tokens?: number;
+  cloud_duration_s?: number;
+  cloud_energy_origin?: string;
   certificate_id: string;
   proof_hash: string;
   block_index: number;
   verified_at: string;
+  certificate_url?: string;
+  proof_url?: string;
+  verify_url?: string;
 };
 
 type DashboardResponse = {
@@ -89,6 +102,12 @@ function fmt(value: number, digits = 3) {
   if (!Number.isFinite(value)) return '—';
   if (Math.abs(value) >= 1000) return value.toLocaleString(undefined, { maximumFractionDigits: 0 });
   return value.toFixed(digits);
+}
+
+function fmtCarbon(value: number) {
+  if (!Number.isFinite(value)) return '—';
+  if (value > 0 && value < 0.0001) return '<0.0001 g';
+  return `${value.toFixed(4)} g`;
 }
 
 function fmtTime(value?: string) {
@@ -258,7 +277,7 @@ export default function Home() {
             <div className="impact-three-up">
               <div><span>Reduction</span><strong>{latest ? `${fmt(latest.reduction_pct, 1)}%` : '—'}</strong></div>
               <div><span>Cloud footprint</span><strong>{latest ? `${fmt(latest.cloud_carbon_g, 4)} g` : '—'}</strong></div>
-              <div><span>Local footprint</span><strong>{latest ? `${fmt(latest.local_carbon_g, 4)} g` : '—'}</strong></div>
+              <div><span>Local footprint</span><strong>{latest ? fmtCarbon(latest.local_carbon_g) : '—'}</strong></div>
             </div>
 
             <div className="hero-record-bar">
@@ -336,11 +355,26 @@ export default function Home() {
                     <p>{latest.prompt_preview || 'Prompt content withheld; telemetry received.'}</p>
                   </div>
 
-                  <div className="telemetry-grid">
-                    <div><span>Input tokens</span><strong>{latest.input_tokens}</strong><small>reported by the AI runtime</small></div>
-                    <div><span>Output tokens</span><strong>{latest.output_tokens}</strong><small>completion workload</small></div>
-                    <div><span>Edge device</span><strong className="text-value">{latest.device}</strong><small>{latest.energy_source}</small></div>
-                    <div><span>Measured energy</span><strong>{fmt(latest.local_energy_j, 2)} J</strong><small>{latest.local_measurement_origin}</small></div>
+                  <div className="telemetry-split">
+                    <section className="telemetry-lane local-lane">
+                      <div className="lane-title"><span>LOCAL TEST</span><b>{latest.model}</b></div>
+                      <div className="telemetry-grid">
+                        <div><span>Input tokens</span><strong>{latest.input_tokens}</strong><small>Ollama Local</small></div>
+                        <div><span>Output tokens</span><strong>{latest.output_tokens}</strong><small>generated locally</small></div>
+                        <div><span>GPU energy</span><strong>{fmt(latest.local_energy_j, 3)} J</strong><small>telemetry-derived</small></div>
+                        <div><span>Runtime</span><strong>{fmt(latest.local_duration_s || 0, 3)} s</strong><small>{latest.device}</small></div>
+                      </div>
+                    </section>
+
+                    <section className="telemetry-lane cloud-lane">
+                      <div className="lane-title"><span>CLOUD TEST</span><b>{latest.cloud_model || 'Cloud baseline'}</b></div>
+                      <div className="telemetry-grid">
+                        <div><span>Input tokens</span><strong>{latest.cloud_input_tokens ?? '—'}</strong><small>{latest.cloud_provider || 'Cloud provider'}</small></div>
+                        <div><span>Output tokens</span><strong>{latest.cloud_output_tokens ?? '—'}</strong><small>cloud completion</small></div>
+                        <div><span>Cloud energy</span><strong>{fmt(latest.cloud_energy_j, 1)} J</strong><small>testing estimate</small></div>
+                        <div><span>Runtime</span><strong>{fmt(latest.cloud_duration_s || 0, 3)} s</strong><small>{latest.cloud_energy_origin || 'estimated baseline'}</small></div>
+                      </div>
+                    </section>
                   </div>
                 </>
               ) : (
@@ -372,13 +406,13 @@ export default function Home() {
 
                 <div className="compare-side local-side">
                   <span className="compare-icon"><Icon name="phone" /></span>
-                  <div><small>LOCAL EDGE NODE</small><strong>{latest ? `${fmt(latest.local_carbon_g, 4)} g` : '—'}</strong><p>{latest?.energy_source || 'Measured on device'}</p></div>
+                  <div><small>LOCAL EDGE NODE</small><strong>{latest ? fmtCarbon(latest.local_carbon_g) : '—'}</strong><p>{latest?.energy_source || 'Measured on device'}</p></div>
                 </div>
               </div>
 
               <div className="bar-lab">
                 <div className="bar-line"><span>Cloud AI</span><div className="track"><i className="cloud-fill" style={{ width: latest ? '100%' : '0%' }} /></div><b>{latest ? fmt(latest.cloud_carbon_g, 4) : '—'}</b></div>
-                <div className="bar-line"><span>Local edge</span><div className="track"><i className="local-fill" style={{ width: latest ? `${Math.max(1.5, localShare)}%` : '0%' }} /></div><b>{latest ? fmt(latest.local_carbon_g, 4) : '—'}</b></div>
+                <div className="bar-line"><span>Local edge</span><div className="track"><i className="local-fill" style={{ width: latest ? `${Math.max(1.5, localShare)}%` : '0%' }} /></div><b>{latest ? fmtCarbon(latest.local_carbon_g) : '—'}</b></div>
               </div>
             </article>
           </div>
@@ -411,7 +445,13 @@ export default function Home() {
                   <div><span>Proof hash</span><b>{latest ? shortHash(latest.proof_hash, 12, 7) : '—'}</b></div>
                   <div><span>Verified at</span><b>{latest ? fmtTime(latest.verified_at) : '—'}</b></div>
                 </div>
-                {latest && <button className="copy-proof" onClick={copyCertificate}>{copied ? 'Certificate ID copied ✓' : 'Copy certificate ID'}</button>}
+                {latest && (
+                  <div className="cert-actions">
+                    <a className="cert-action primary" href={`/certificate/${encodeURIComponent(latest.certificate_id)}`}>Open certificate ↗</a>
+                    <a className="cert-action" href={`/verify/${encodeURIComponent(latest.certificate_id)}`}>Verify record</a>
+                    <button className="cert-action" onClick={copyCertificate}>{copied ? 'Copied ✓' : 'Copy ID'}</button>
+                  </div>
+                )}
               </div>
             </article>
 
@@ -438,7 +478,7 @@ export default function Home() {
 
           <div className="history-table-wrap">
             <table className="history-table">
-              <thead><tr><th>Session</th><th>Model</th><th>Tokens</th><th>Local energy</th><th>Cloud CO₂e</th><th>Local CO₂e</th><th>Avoided</th><th>Proof</th></tr></thead>
+              <thead><tr><th>Session</th><th>Model</th><th>Tokens</th><th>Local energy</th><th>Cloud CO₂e</th><th>Local CO₂e</th><th>Avoided</th><th>Proof</th><th>Certificate</th><th>Verify</th></tr></thead>
               <tbody>
                 {dashboard.history.length > 0 ? dashboard.history.map((record) => (
                   <tr key={record.certificate_id} onClick={() => setSelected(record)} className={selected?.certificate_id === record.certificate_id ? 'selected-row' : ''}>
@@ -447,12 +487,20 @@ export default function Home() {
                     <td>{record.total_tokens}</td>
                     <td>{fmt(record.local_energy_j, 2)} J</td>
                     <td>{fmt(record.cloud_carbon_g, 4)} g</td>
-                    <td>{fmt(record.local_carbon_g, 4)} g</td>
+                    <td>{fmtCarbon(record.local_carbon_g)}</td>
                     <td className="good">{fmt(record.net_avoided_g, 4)} ACU</td>
-                    <td><span className="proof-pill">Block #{record.block_index}</span></td>
+                    <td>
+                      <a className="table-link proof-link" href={`/proof/${encodeURIComponent(record.certificate_id)}`} onClick={(e) => e.stopPropagation()}>Block #{record.block_index}</a>
+                    </td>
+                    <td>
+                      <a className="table-link cert-link" href={`/certificate/${encodeURIComponent(record.certificate_id)}`} onClick={(e) => e.stopPropagation()}>{shortHash(record.certificate_id, 10, 5)}</a>
+                    </td>
+                    <td>
+                      <a className="table-link verify-link" href={`/verify/${encodeURIComponent(record.certificate_id)}`} onClick={(e) => e.stopPropagation()}>Verify ↗</a>
+                    </td>
                   </tr>
                 )) : (
-                  <tr className="empty-row"><td colSpan={8}>No records yet. Connect your friend&apos;s AI runtime and GreenByte will populate this automatically.</td></tr>
+                  <tr className="empty-row"><td colSpan={10}>No records yet. Connect your friend&apos;s AI runtime and GreenByte will populate this automatically.</td></tr>
                 )}
               </tbody>
             </table>
